@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SECUTOR - Logistics Control Tower v0.11</title>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; background-color: #f8fafc; }
+        .card-drag { cursor: grab; }
+        .card-drag:active { cursor: grabbing; }
+        ::-webkit-scrollbar { height: 10px; width: 8px; }
+        ::-webkit-scrollbar-track { background: #f1f5f9; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 5px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+        
+        .blink-red { animation: blinker 2s linear infinite; color: #dc2626; font-weight: bold; }
+        @keyframes blinker { 50% { opacity: 0.5; } }
+        .badge-qc { background-color: #8b5cf6; color: white; animation: pulse 2s infinite; }
+        .badge-move { background-color: #dc2626; color: white; animation: pulse 1s infinite; }
+        @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.7); } 70% { box-shadow: 0 0 0 6px rgba(220, 38, 38, 0); } 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0); } }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useRef } = React;
+
+        // --- 14-STEP WORKFLOW ---
+        const WORKFLOW_STAGES = [
+            { id: 'On Water', label: '1. ON WATER (TRANSIT)', color: 'border-t-4 border-gray-400' },
+            { id: 'QC Check', label: '2. ETA-2 QC CHECK (VERIFY)', color: 'border-t-4 border-indigo-500 bg-indigo-50' },
+            { id: 'Arrived', label: '3. VESSEL ARRIVED (ACTION!)', color: 'border-t-4 border-red-600 bg-red-50' },
+            { id: 'Line DO Req', label: '4. S/LINE D/O REQUESTED', color: 'border-t-4 border-yellow-400' },
+            { id: 'Pending MDO', label: '5. PENDING MASTER D/O', color: 'border-t-4 border-yellow-600 bg-yellow-50' },
+            { id: 'House DO Inv', label: '6. PSA BDP D/O + INV POSTED', color: 'border-t-4 border-orange-400' },
+            { id: 'Port Notified', label: '7. PORT OFFICE IS NOTIFIED', color: 'border-t-4 border-blue-400' },
+            { id: 'AN Sent', label: '8. A/N SENT TO CNEE', color: 'border-t-4 border-purple-400' },
+            { id: 'Line DO Sent', label: '9. S/LINE D/O SENT TO CNEE', color: 'border-t-4 border-indigo-400' },
+            { id: 'Del Requested', label: '10. FINAL DELIVERY REQUESTED', color: 'border-t-4 border-cyan-400' },
+            { id: 'Del Arranged', label: '11. FINAL DELIVERY ARRANGED', color: 'border-t-4 border-teal-400' },
+            { id: 'Empty Return', label: '12. EMPTY RETURN IS DONE', color: 'border-t-4 border-green-600' },
+            { id: 'DD Control', label: '13. D&D CONTROL AND INVOICING', color: 'border-t-4 border-pink-500 bg-pink-50' },
+            { id: 'Closed', label: '14. FILE CLOSED OPERATIONALLY', color: 'border-t-4 border-slate-600' }
+        ];
+
+        // --- SECUTOR LOGO COMPONENT ---
+        const SecutorLogo = () => (
+            <svg viewBox="0 0 600 200" className="h-14 w-auto">
+                <g transform="translate(50, 40) scale(0.9)">
+                    <line x1="60" y1="10" x2="60" y2="130" fill="none" stroke="#ffffff" strokeWidth="8" strokeLinecap="round" strokeLinejoin="round" />
+                    <path d="M 60 10 L 25 90 L 60 80" fill="none" stroke="#ffffff" strokeWidth="8" strokeLinecap="round" strokeLinejoin="round" />
+                    <path d="M 60 10 L 95 90 L 60 80" fill="none" stroke="#ffffff" strokeWidth="8" strokeLinecap="round" strokeLinejoin="round" />
+                </g>
+                <line x1="170" y1="40" x2="170" y2="160" stroke="#ffffff" strokeWidth="3" />
+                <text x="195" y="115" fontSize="85" fontFamily="'Times New Roman', Times, serif" fontWeight="bold" fill="#ffffff">SECUTOR</text>
+                <text x="200" y="155" fontSize="24" fontFamily="'Times New Roman', Times, serif" fontWeight="normal" letterSpacing="3" fill="#ffffff">TRACK. CONTROL. DELIVER.</text>
+            </svg>
+        );
+
+        // --- 10 REALISTIC EXAMPLE FILES ---
+        const generateMockData = () => {
+            const today = new Date();
+            
+            const getRelativeDate = (days) => {
+                const d = new Date(today);
+                d.setDate(today.getDate() + days);
+                return d.toISOString().split('T')[0];
+            };
+
+            return [
+                { id: 1, meridianNum: 'TR24-05991', psaRef: 'BDP-IST-991', mbl: 'MEDU120948', hbl: 'HBL9910', consignee: 'LC Waikiki Retail', carrier: 'MSC', currentEta: getRelativeDate(5), stage: 'On Water', comments: [{date: '26.11.2025', text: 'Vessel on schedule.'}] },
+                { id: 2, meridianNum: 'TR24-05992', psaRef: 'BDP-MER-992', mbl: 'MAEU837461', hbl: 'HBL9921', consignee: 'Defacto Magazacilik', carrier: 'Maersk', currentEta: getRelativeDate(1), stage: 'QC Check', comments: [{date: '26.11.2025', text: 'Checking vessel position.'}] },
+                { id: 3, meridianNum: 'TR24-05993', psaRef: 'BDP-IST-993', mbl: 'CMDU384710', hbl: 'HBL9932', consignee: 'Migros Ticaret A.S.', carrier: 'CMA CGM', currentEta: getRelativeDate(-1), stage: 'Arrived', comments: [{date: '25.11.2025', text: 'Vessel docked at Kumport.'}] },
+                { id: 4, meridianNum: 'TR24-05994', psaRef: 'BDP-IZM-994', mbl: 'COSU918273', hbl: 'HBL9943', consignee: 'Ford Otosan', carrier: 'Cosco', currentEta: getRelativeDate(-2), stage: 'Line DO Req', comments: [{date: '24.11.2025', text: 'Requested DO from Arkas.'}] },
+                { id: 5, meridianNum: 'TR24-05995', psaRef: 'BDP-IST-995', mbl: 'ONEU726354', hbl: 'HBL9954', consignee: 'Arcelik A.S.', carrier: 'ONE', currentEta: getRelativeDate(-3), stage: 'Pending MDO', comments: [{date: '23.11.2025', text: 'Waiting for Line payment confirmation.'}] },
+                { id: 6, meridianNum: 'TR24-05996', psaRef: 'BDP-MER-996', mbl: 'HLCU102938', hbl: 'HBL9965', consignee: 'Vestel Elektronik', carrier: 'Hapag-Lloyd', currentEta: getRelativeDate(-4), stage: 'House DO Inv', comments: [{date: '22.11.2025', text: 'Invoice posted to SAP.'}] },
+                { id: 7, meridianNum: 'TR24-05997', psaRef: 'BDP-IST-997', mbl: 'ZIMU473829', hbl: 'HBL9976', consignee: 'Tofas Turk Otomobil', carrier: 'ZIM', currentEta: getRelativeDate(-5), stage: 'Port Notified', comments: [{date: '21.11.2025', text: 'Sent release to Port Team.'}] },
+                { id: 8, meridianNum: 'TR24-05998', psaRef: 'BDP-GEM-998', mbl: 'MSCU928374', hbl: 'HBL9987', consignee: 'Flo Magazacilik', carrier: 'MSC', currentEta: getRelativeDate(-6), stage: 'AN Sent', comments: [{date: '20.11.2025', text: 'Full set sent to broker.'}] },
+                { id: 9, meridianNum: 'TR24-05999', psaRef: 'BDP-IST-999', mbl: 'MAEU102938', hbl: 'HBL9998', consignee: 'Koton Magazacilik', carrier: 'Maersk', currentEta: getRelativeDate(10), stage: 'On Water', comments: [{date: '26.11.2025', text: 'Docs received from origin.'}] },
+                { id: 10, meridianNum: 'TR24-06000', psaRef: 'BDP-IST-000', mbl: 'CMDU564738', hbl: 'HBL0009', consignee: 'Mavi Giyim', carrier: 'CMA CGM', currentEta: getRelativeDate(0), stage: 'Arrived', comments: [{date: '26.11.2025', text: 'Arrived today. Prep docs.'}] }
+            ];
+        };
+
+        const formatDate = (d) => {
+            if(!d) return '-';
+            if (typeof d === 'number') {
+                const excelEpoch = new Date(1899, 11, 30);
+                const dt = new Date(excelEpoch.getTime() + d * 86400000);
+                return dt.toLocaleDateString('tr-TR', { month: 'short', day: 'numeric' });
+            }
+            return new Date(d).toLocaleDateString('tr-TR', { month: 'short', day: 'numeric' });
+        };
+
+        const processExcelFile = (file, callback) => {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const data = new Uint8Array(e.target.result);
+                const workbook = XLSX.read(data, { type: 'array', cellDates: true });
+                const sheetName = workbook.SheetNames[0];
+                const sheet = workbook.Sheets[sheetName];
+                const jsonData = XLSX.utils.sheet_to_json(sheet);
+                callback(jsonData);
+            };
+            reader.readAsArrayBuffer(file);
+        };
+
+        const isQCDue = (stage, etaDate) => {
+            if (stage !== 'On Water') return false; 
+            if (!etaDate) return false;
+            const today = new Date(); today.setHours(0,0,0,0);
+            const eta = new Date(etaDate); eta.setHours(0,0,0,0);
+            const diffTime = eta - today;
+            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+            return diffDays <= 2 && diffDays > 0; 
+        };
+
+        const isMoveDue = (stage, etaDate) => {
+            if (['On Water', 'QC Check'].includes(stage)) {
+                if (!etaDate) return false;
+                const today = new Date(); today.setHours(0,0,0,0);
+                const eta = new Date(etaDate); eta.setHours(0,0,0,0);
+                return eta <= today;
+            }
+            return false;
+        };
+
+        // --- COMPONENTS ---
+
+        const StatCard = ({ title, count, color, icon, isBlinking }) => (
+            <div className={`bg-white p-4 rounded-xl shadow-sm border-l-4 ${color} flex items-center justify-between transition-transform hover:scale-[1.02]`}>
+                <div>
+                    <p className="text-gray-500 text-xs uppercase font-bold tracking-wider">{title}</p>
+                    <h3 className={`text-2xl font-bold text-gray-800 ${isBlinking ? 'blink-red' : ''}`}>{count}</h3>
+                </div>
+                <div className={`w-10 h-10 rounded-full flex items-center justify-center text-white opacity-90 shadow-sm ${color.replace('border-', 'bg-').split('-')[0] + '-' + color.replace('border-', 'bg-').split('-')[1] + '-500'}`}>
+                    <i className={`fa ${icon}`}></i>
+                </div>
+            </div>
+        );
+
+        const ShipmentModal = ({ isOpen, onClose, onSave, shipment }) => {
+            const [formData, setFormData] = useState({
+                meridianNum: '', psaRef: '', mbl: '', hbl: '', consignee: '', carrier: '', currentEta: '', stage: WORKFLOW_STAGES[0].id, newComment: ''
+            });
+
+            useEffect(() => {
+                if (shipment) {
+                    setFormData({ ...shipment, newComment: '' });
+                } else {
+                    setFormData({
+                        meridianNum: '', psaRef: '', mbl: '', hbl: '', consignee: '', carrier: '', currentEta: '', stage: WORKFLOW_STAGES[0].id, newComment: ''
+                    });
+                }
+            }, [shipment, isOpen]);
+
+            if (!isOpen) return null;
+
+            const handleSubmit = (e) => {
+                e.preventDefault();
+                onSave(formData);
+            };
+
+            return (
+                <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 backdrop-blur-sm p-4">
+                    <div className="bg-white rounded-xl shadow-2xl w-full max-w-xl overflow-hidden animate-fade-in-up">
+                        <div className="bg-slate-900 px-6 py-4 flex justify-between items-center">
+                            <div className="flex items-center gap-3">
+                                <div className="bg-blue-500 w-1 h-6 rounded-full"></div>
+                                <h3 className="text-white font-semibold text-lg tracking-wide">{shipment ? 'Edit Shipment' : 'New Shipment'}</h3>
+                            </div>
+                            <button onClick={onClose} className="text-gray-400 hover:text-white transition-colors"><i className="fa fa-times text-lg"></i></button>
+                        </div>
+                        <form onSubmit={handleSubmit} className="p-6 space-y-5">
+                            <div className="grid grid-cols-2 gap-5">
+                                <div>
+                                    <label className="block text-xs font-bold text-blue-800 uppercase mb-1 tracking-wide">Meridian Number</label>
+                                    <input required type="text" placeholder="TR24-..." className="w-full border border-gray-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-blue-500 outline-none font-bold bg-slate-50" 
+                                        value={formData.meridianNum} onChange={e => setFormData({...formData, meridianNum: e.target.value})} />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-bold text-gray-500 uppercase mb-1 tracking-wide">PSA BDP REF</label>
+                                    <input type="text" placeholder="BDP-..." className="w-full border border-gray-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-blue-500 outline-none" 
+                                        value={formData.psaRef} onChange={e => setFormData({...formData, psaRef: e.target.value})} />
+                                </div>
+                            </div>
+                            <div className="grid grid-cols-2 gap-5 bg-gray-50 p-3 rounded-lg border border-gray-100">
+                                <div>
+                                    <label className="block text-xs font-bold text-gray-500 uppercase mb-1">MBL (Master)</label>
+                                    <input type="text" className="w-full border border-gray-300 rounded-md p-2 text-sm" 
+                                        value={formData.mbl} onChange={e => setFormData({...formData, mbl: e.target.value})} />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-bold text-gray-500 uppercase mb-1">HBL (House)</label>
+                                    <input type="text" className="w-full border border-gray-300 rounded-md p-2 text-sm" 
+                                        value={formData.hbl} onChange={e => setFormData({...formData, hbl: e.target.value})} />
+                                </div>
+                            </div>
+                            <div className="grid grid-cols-2 gap-5">
+                                <div>
+                                    <label className="block text-xs font-bold text-gray-700 uppercase mb-1">Consignee</label>
+                                    <input required type="text" className="w-full border border-gray-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-blue-500 outline-none" 
+                                        value={formData.consignee} onChange={e => setFormData({...formData, consignee: e.target.value})} />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-bold text-gray-700 uppercase mb-1">Carrier</label>
+                                    <input type="text" className="w-full border border-gray-300 rounded-lg p-2.5 text-sm" 
+                                        value={formData.carrier} onChange={e => setFormData({...formData, carrier: e.target.value})} />
+                                </div>
+                            </div>
+                            <div className="grid grid-cols-2 gap-5">
+                                <div>
+                                    <label className="block text-xs font-bold text-red-600 uppercase mb-1">Current ETA (Arrival)</label>
+                                    <input required type="date" className="w-full border-2 border-blue-100 rounded-lg p-2.5 text-sm focus:border-blue-500 outline-none" 
+                                        value={formData.currentEta} onChange={e => setFormData({...formData, currentEta: e.target.value})} />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Current Stage</label>
+                                    <select className="w-full border border-gray-300 rounded-lg p-2.5 text-sm bg-white"
+                                        value={formData.stage} onChange={e => setFormData({...formData, stage: e.target.value})}>
+                                        {WORKFLOW_STAGES.map(s => (
+                                            <option key={s.id} value={s.id}>{s.label}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                            </div>
+                            <div className="bg-yellow-50 p-3 rounded-lg border border-yellow-100">
+                                <label className="block text-xs font-bold text-yellow-800 uppercase mb-1">Add Update Note</label>
+                                <textarea className="w-full border border-yellow-200 rounded-md p-2 text-sm h-16 focus:ring-2 focus:ring-yellow-400 outline-none" 
+                                    placeholder="Update comments..."
+                                    value={formData.newComment} onChange={e => setFormData({...formData, newComment: e.target.value})}></textarea>
+                            </div>
+                            <div className="flex justify-end gap-3 pt-2">
+                                <button type="button" onClick={onClose} className="px-5 py-2.5 text-gray-600 hover:bg-gray-100 rounded-lg text-sm font-medium transition-colors">Cancel</button>
+                                <button type="submit" className="px-5 py-2.5 bg-slate-900 text-white rounded-lg text-sm font-medium hover:bg-slate-800 shadow-lg transition-all transform hover:-translate-y-0.5">Save Record</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            );
+        };
+
+        const App = () => {
+            const [view, setView] = useState('board');
+            const [shipments, setShipments] = useState([]);
+            const [isModalOpen, setIsModalOpen] = useState(false);
+            const [editingShipment, setEditingShipment] = useState(null);
+            const [searchTerm, setSearchTerm] = useState('');
+
+            useEffect(() => {
+                const savedData = localStorage.getItem('logisticsData_v0.11');
+                if (savedData) {
+                    setShipments(JSON.parse(savedData));
+                } else {
+                    setShipments(generateMockData());
+                }
+            }, []);
+
+            useEffect(() => {
+                localStorage.setItem('logisticsData_v0.11', JSON.stringify(shipments));
+            }, [shipments]);
+
+            const handleAddNew = () => { setEditingShipment(null); setIsModalOpen(true); };
+            const handleEdit = (shipment) => { setEditingShipment(shipment); setIsModalOpen(true); };
+            const handleDelete = (id, e) => {
+                e.stopPropagation();
+                if(confirm('Delete this file?')) {
+                    const updated = shipments.filter(s => s.id !== id);
+                    setShipments(updated);
+                }
+            };
+
+            const handleSave = (formData) => {
+                let updatedShipments;
+                const timestamp = new Date().toLocaleString('tr-TR');
+                let comments = formData.comments || [];
+                if (formData.newComment && formData.newComment.trim() !== '') {
+                    comments = [{ date: timestamp, text: formData.newComment }, ...comments];
+                }
+                const payload = { ...formData, comments };
+                delete payload.newComment; 
+                if (editingShipment) {
+                    updatedShipments = shipments.map(s => s.id === editingShipment.id ? { ...s, ...payload } : s);
+                } else {
+                    updatedShipments = [...shipments, { ...payload, id: Date.now() }];
+                }
+                setShipments(updatedShipments);
+                setIsModalOpen(false);
+            };
+
+            const handleExcelUpload = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                processExcelFile(file, (jsonData) => {
+                    const newShipments = jsonData.map((row, index) => {
+                        let etaStr = '';
+                        if (row['ETA']) {
+                            if (row['ETA'] instanceof Date) {
+                                etaStr = row['ETA'].toISOString().split('T')[0];
+                            } else {
+                                etaStr = String(row['ETA']);
+                            }
+                        }
+                        const stageText = row['Stage'] || 'On Water';
+                        let stageId = 'On Water';
+                        const match = WORKFLOW_STAGES.find(s => s.label.toLowerCase().includes(stageText.toLowerCase()) || s.id.toLowerCase() === stageText.toLowerCase());
+                        if(match) stageId = match.id;
+                        else if (stageText === 'Arrived') stageId = 'Arrived';
+
+                        return {
+                            id: Date.now() + index,
+                            meridianNum: row['Meridian Number'] || `IMP-${Math.floor(Math.random()*1000)}`,
+                            psaRef: row['PSA Ref'] || '',
+                            mbl: row['MBL'] || '',
+                            hbl: row['HBL'] || '',
+                            consignee: row['Consignee'] || 'Unknown',
+                            carrier: row['Carrier'] || '',
+                            currentEta: etaStr,
+                            stage: stageId,
+                            comments: row['Comments'] ? [{ date: new Date().toLocaleDateString(), text: row['Comments'] }] : []
+                        };
+                    });
+                    if (confirm(`Found ${newShipments.length} rows. Import them?`)) {
+                        setShipments(prev => [...prev, ...newShipments]);
+                    }
+                });
+            };
+
+            const handleBackupExport = () => {
+                const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(shipments));
+                const downloadAnchorNode = document.createElement('a');
+                downloadAnchorNode.setAttribute("href", dataStr);
+                downloadAnchorNode.setAttribute("download", "secutor_backup_v0.11.json");
+                document.body.appendChild(downloadAnchorNode);
+                downloadAnchorNode.click();
+                downloadAnchorNode.remove();
+            };
+            const handleBackupImport = (event) => {
+                const fileReader = new FileReader();
+                fileReader.readAsText(event.target.files[0], "UTF-8");
+                fileReader.onload = e => { setShipments(JSON.parse(e.target.result)); };
+            };
+
+            const filteredShipments = shipments.filter(s => 
+                (s.meridianNum && s.meridianNum.toLowerCase().includes(searchTerm.toLowerCase())) || 
+                (s.psaRef && s.psaRef.toLowerCase().includes(searchTerm.toLowerCase())) ||
+                (s.mbl && s.mbl.toLowerCase().includes(searchTerm.toLowerCase())) ||
+                (s.hbl && s.hbl.toLowerCase().includes(searchTerm.toLowerCase())) ||
+                s.consignee.toLowerCase().includes(searchTerm.toLowerCase())
+            );
+
+            const stats = useMemo(() => {
+                let arrived = 0, qcDue = 0;
+                const today = new Date(); today.setHours(0,0,0,0);
+                shipments.forEach(s => {
+                    if (s.stage === 'Closed') return;
+                    const eta = new Date(s.currentEta); eta.setHours(0,0,0,0);
+                    if (s.stage === 'Arrived' || (eta <= today && ['On Water', 'QC Check'].includes(s.stage))) { arrived++; }
+                    if (isQCDue(s.stage, s.currentEta)) qcDue++;
+                });
+                return { arrived, qcDue, total: shipments.length };
+            }, [shipments]);
+
+            const onDragStart = (e, id) => { e.dataTransfer.setData("id", id); };
+            const onDragOver = (e) => { e.preventDefault(); };
+            const onDrop = (e, stageId) => {
+                const id = e.dataTransfer.getData("id");
+                const updated = shipments.map(s => s.id.toString() === id ? { ...s, stage: stageId } : s);
+                setShipments(updated);
+            };
+
+            return (
+                <div className="min-h-screen flex flex-col">
+                    <nav className="bg-slate-900 text-white shadow-xl sticky top-0 z-40 border-b border-slate-700 min-w-full">
+                        <div className="w-full px-6 py-3 flex justify-between items-center">
+                            <div className="flex items-center gap-4">
+                                {/* SECUTOR LOGO */}
+                                <SecutorLogo />
+                            </div>
+                            <div className="flex items-center gap-4">
+                                <div className="relative">
+                                    <i className="fa fa-search absolute left-3 top-2.5 text-slate-400 text-sm"></i>
+                                    <input type="text" placeholder="Search any reference..." className="bg-slate-800 text-white pl-9 pr-4 py-2 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500 w-64 transition-all border border-slate-700 focus:border-transparent" value={searchTerm} onChange={e => setSearchTerm(e.target.value)} />
+                                </div>
+                                
+                                <div className="h-6 w-px bg-slate-700 mx-2"></div>
+                                
+                                <label className="bg-emerald-600 hover:bg-emerald-700 text-white text-sm cursor-pointer flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors shadow-md hover:shadow-lg transform hover:-translate-y-0.5">
+                                    <i className="fa fa-file-excel"></i> <span className="hidden sm:inline font-medium">Import</span>
+                                    <input type="file" className="hidden" onChange={handleExcelUpload} accept=".xlsx, .xls, .csv" />
+                                </label>
+
+                                <button onClick={handleBackupExport} className="text-slate-400 hover:text-white text-sm flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-slate-800 transition-colors" title="Save Backup">
+                                    <i className="fa fa-download"></i>
+                                </button>
+                                <label className="text-slate-400 hover:text-white text-sm cursor-pointer flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-slate-800 transition-colors" title="Restore Backup">
+                                    <i className="fa fa-upload"></i>
+                                    <input type="file" className="hidden" onChange={handleBackupImport} accept=".json" />
+                                </label>
+                            </div>
+                        </div>
+                    </nav>
+
+                    <div className="w-full px-6 mt-8 flex-1">
+                        {/* FROZEN STATS BAR */}
+                        <div className="sticky top-[70px] z-30 bg-[#f8fafc] pb-4 pt-2">
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-4">
+                                <StatCard title="Total Active Files" count={stats.total} color="border-blue-500" icon="fa-folder-open" />
+                                <StatCard title="QC CHECKS DUE" count={stats.qcDue} color="border-indigo-500" icon="fa-clipboard-check" isBlinking={stats.qcDue > 0} />
+                                <StatCard title="VESSEL ARRIVED" count={stats.arrived} color="border-red-600" icon="fa-ship" isBlinking={stats.arrived > 0} />
+                            </div>
+
+                            <div className="flex items-center gap-4">
+                                <div className="bg-white rounded-lg p-1 shadow-sm border border-slate-200 inline-flex">
+                                    <button onClick={() => setView('board')} className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${view === 'board' ? 'bg-slate-800 text-white shadow-md' : 'text-gray-600 hover:bg-slate-100'}`}><i className="fa fa-columns mr-2"></i>Board</button>
+                                    <button onClick={() => setView('list')} className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${view === 'list' ? 'bg-slate-800 text-white shadow-md' : 'text-gray-600 hover:bg-slate-100'}`}><i className="fa fa-list mr-2"></i>List</button>
+                                </div>
+                                
+                                {/* NEW SHIPMENT BUTTON */}
+                                <button onClick={handleAddNew} className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2.5 rounded-lg shadow-md font-medium transition-all transform hover:-translate-y-0.5 flex items-center gap-2">
+                                    <i className="fa fa-plus"></i> New Shipment
+                                </button>
+                            </div>
+                        </div>
+
+                        {view === 'board' ? (
+                            <div className="flex gap-5 overflow-x-auto pb-8" style={{minHeight: '600px'}}>
+                                {WORKFLOW_STAGES.map(stage => (
+                                    <div key={stage.id} onDragOver={onDragOver} onDrop={(e) => onDrop(e, stage.id)} className={`min-w-[300px] w-[300px] flex-shrink-0 bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col stage-column`}>
+                                        <div className={`p-4 rounded-t-xl bg-gray-50 border-b border-gray-200 ${stage.color}`}>
+                                            <div className="flex justify-between items-center mb-1">
+                                                <h3 className="font-bold text-xs text-gray-800 uppercase tracking-wide">{stage.label}</h3>
+                                                <span className="bg-white px-2.5 py-0.5 rounded-full text-xs font-bold shadow-sm border border-gray-200 text-gray-600">{filteredShipments.filter(s => s.stage === stage.id).length}</span>
+                                            </div>
+                                        </div>
+                                        <div className="p-3 flex-1 space-y-3 bg-gray-50/50 overflow-y-auto custom-scrollbar" style={{maxHeight: '75vh'}}>
+                                            {filteredShipments.filter(s => s.stage === stage.id).map(s => {
+                                                const hasArrived = new Date(s.currentEta).setHours(0,0,0,0) <= new Date().setHours(0,0,0,0);
+                                                const qcNeeded = isQCDue(s.stage, s.currentEta);
+                                                const moveNeeded = isMoveDue(s.stage, s.currentEta);
+                                                return (
+                                                    <div key={s.id} draggable onDragStart={(e) => onDragStart(e, s.id)} onClick={() => handleEdit(s)} className={`card-drag bg-white p-4 rounded-xl shadow-sm border hover:shadow-lg hover:-translate-y-1 transition-all group relative ${hasArrived && s.stage !== 'Closed' && s.stage !== 'Arrived' ? 'border-red-400 ring-2 ring-red-50' : 'border-gray-200'}`}>
+                                                        {qcNeeded && <div className="absolute -top-2 -right-2 badge-qc text-[10px] font-bold px-2 py-1 rounded-full shadow-md z-10">QC DUE</div>}
+                                                        {moveNeeded && <div className="absolute -top-2 -right-2 badge-move text-[10px] font-bold px-2 py-1 rounded-full shadow-md z-10 uppercase tracking-wide">Move to Arrived</div>}
+                                                        <div className="mb-3 pb-2 border-b border-gray-100">
+                                                            <div className="flex justify-between items-start">
+                                                                <span className="font-bold text-blue-700 text-sm hover:underline cursor-pointer tracking-tight">{s.meridianNum}</span>
+                                                                <button onClick={(e) => handleDelete(s.id, e)} className="text-gray-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity p-1"><i className="fa fa-trash"></i></button>
+                                                            </div>
+                                                            {s.psaRef && <div className="text-[11px] text-gray-500 font-mono mt-1">{s.psaRef}</div>}
+                                                            {s.mbl && <div className="text-[10px] text-blue-600 font-bold font-mono mt-1 bg-blue-50 inline-block px-1 rounded" title="MBL Number">M: {s.mbl}</div>}
+                                                        </div>
+                                                        <h4 className="font-bold text-gray-800 text-sm mb-3 truncate" title={s.consignee}>{s.consignee}</h4>
+                                                        <div className="grid grid-cols-1 gap-2 text-xs mb-3">
+                                                            <div className={`p-2 rounded-lg border flex justify-between items-center ${hasArrived ? 'bg-red-50 border-red-200 text-red-800' : 'bg-gray-50 border-gray-200 text-gray-600'}`}>
+                                                                <span className="font-bold uppercase opacity-70 text-[10px]">Arrival</span>
+                                                                <span className="font-mono font-bold text-sm">{formatDate(s.currentEta)}</span>
+                                                            </div>
+                                                        </div>
+                                                        {s.comments && s.comments.length > 0 && <div className="pt-2 mt-2"><div className="flex items-start gap-2"><i className="fa fa-comment-alt text-gray-300 text-[10px] mt-1"></i><p className="text-xs text-gray-500 italic line-clamp-2">{s.comments[0].text}</p></div><p className="text-[10px] text-gray-300 text-right mt-1">{s.comments[0].date}</p></div>}
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        ) : (
+                            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                                <table className="w-full text-sm text-left">
+                                    <thead className="bg-slate-50 text-gray-500 font-medium border-b">
+                                        <tr><th className="px-6 py-4">Meridian #</th><th className="px-6 py-4">PSA Ref</th><th className="px-6 py-4">Consignee</th><th className="px-6 py-4">MBL / HBL</th><th className="px-6 py-4">Stage</th><th className="px-6 py-4">Arrival</th><th className="px-6 py-4 text-right">Actions</th></tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-gray-100">
+                                        {filteredShipments.map(s => {
+                                             const qcNeeded = isQCDue(s.stage, s.currentEta);
+                                             const moveNeeded = isMoveDue(s.stage, s.currentEta);
+                                             return (
+                                                <tr key={s.id} className="hover:bg-gray-50 transition-colors group">
+                                                    <td className="px-6 py-4 font-bold text-blue-700 cursor-pointer" onClick={() => handleEdit(s)}>{s.meridianNum} {qcNeeded && <span className="ml-2 bg-indigo-500 text-white text-[10px] px-2 py-0.5 rounded-full">QC DUE</span>} {moveNeeded && <span className="ml-2 bg-red-600 text-white text-[10px] px-2 py-0.5 rounded-full">ARRIVED!</span>}</td>
+                                                    <td className="px-6 py-4 text-gray-500 font-mono text-xs">{s.psaRef}</td>
+                                                    <td className="px-6 py-4 text-gray-800 font-medium">{s.consignee}</td>
+                                                    <td className="px-6 py-4 text-xs text-gray-500"><div className="font-bold text-blue-600 bg-blue-50 inline-block px-1 rounded mb-1">M: {s.mbl || '-'}</div><div>H: {s.hbl || '-'}</div></td>
+                                                    <td className="px-6 py-4"><span className="bg-gray-100 text-gray-600 px-2.5 py-1 rounded-full text-xs border font-medium whitespace-nowrap">{WORKFLOW_STAGES.find(st => st.id === s.stage)?.label || s.stage}</span></td>
+                                                    <td className="px-6 py-4 font-mono text-gray-700">{formatDate(s.currentEta)}</td>
+                                                    <td className="px-6 py-4 text-right"><button onClick={() => handleEdit(s)} className="text-blue-500 hover:text-blue-700 mr-4 transition-colors"><i className="fa fa-pencil"></i></button><button onClick={(e) => handleDelete(s.id, e)} className="text-gray-300 hover:text-red-500 transition-colors"><i className="fa fa-trash"></i></button></td>
+                                                </tr>
+                                             );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+                    </div>
+                    <footer className="bg-slate-900 text-slate-400 text-xs text-center py-3 border-t border-slate-800 sticky bottom-0 z-40">
+                        SECUTOR - PSA BDP TURKEY IMPORT ARRIVAL MONITORING SYSTEM | SARPER DEMIR | 2025
+                    </footer>
+                    <ShipmentModal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} onSave={handleSave} shipment={editingShipment} />
+                </div>
+            );
+        };
+        const root = ReactDOM.createRoot(document.getElementById('root')); root.render(<App />);
+    </script>
+</body>
+</html>
